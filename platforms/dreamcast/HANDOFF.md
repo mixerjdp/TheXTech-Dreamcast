@@ -2,8 +2,8 @@
 
 **Objetivo:** un CDI que permita **seleccionar campañas** y **jugarlas** en Dreamcast retail (16 MB) / Flycast.
 
-**Última actualización:** 2026-08-10
-**Repo:** `I:\sw\TheXTech-main`
+**Última actualización:** 2026-08-11
+**Repo:** `I:\sw\TheXTech-main` (remoto: `mixerjdp/TheXTech-Dreamcast`)
 **Idioma de trabajo con el usuario:** español
 
 ---
@@ -11,8 +11,8 @@
 ## Estado actual
 
 **Jugable, con imagen y sonido completos.** Arranca, el menú se lee, se elige
-episodio, se carga el nivel y se juega a ~60 FPS ocupando los 640x480, con
-efectos de sonido y música.
+episodio (`cliche`), se carga el nivel y se juega a ~60 FPS ocupando los
+640x480, con efectos de sonido y música de mapa/nivel (loop estable).
 
 | Pieza | Estado | Cómo se verificó |
 |---|---|---|
@@ -21,13 +21,14 @@ efectos de sonido y música.
 | Texto / fuentes | OK | Menú legible en captura |
 | Menú → episodio → nivel | OK | Confirmado por el usuario con mando |
 | Viewport | OK | Llena 640x480, sin bordes |
-| Efectos de sonido | OK | 104 cargados en AICA; audio medido |
-| Música | OK | Streaming Ogg; -16 dB medios en captura |
+| Efectos de sonido | OK | 104 cargados en AICA; saltos ya no matan la música |
+| Música (mapa + nivel) | OK | Buffer RAM + `fmemopen`; pistas de episodio en CDI |
 | Controles Maple | OK | Jugado con mando |
 | Guardado persistente | **Falta** | `/ram` es volátil |
 | Rendimiento | **Mejorable** | Baja de 60 en escenas cargadas |
+| CI remoto | **Apagado** | Workflows multiplataforma borrados del fork |
 
-Artefacto entregado: `dist/dreamcast/thextech_dc.cdi` (~176 MB con música).
+Artefacto entregado: `dist/dreamcast/thextech_dc.cdi` (~180 MB con `cliche` + música).
 
 ---
 
@@ -42,7 +43,12 @@ python utils/convertkit/gfx-convert-dc.py gamepack build-dreamcast/cdroot --worl
 ~35 s. Convierte gráficos, efectos y música. Flags: `--worlds` elige campañas
 (sin él, todas), `--no-sfx`, `--no-music`, `--no-twiddle`, `--no-lists`.
 
+Convierte **`music/` de la raíz y de cada episodio** (`worlds/cliche/music/`),
+reescribe `music.ini` y los `MF:"….spc"` embebidos en `.lvlx`/`.wldx` a `.ogg`.
+Sin eso, el mapa puede sonar y el nivel quedar en silencio.
+
 ffmpeg debe traer el demuxer **libgme** (para los `.spc`) y **libvorbis**.
+Bitrate de música: **24 kbps** mono 22 kHz (cabe en el buffer de staging).
 
 ### 2. Motor
 
@@ -99,17 +105,19 @@ ffmpeg -i /tmp/cap.wav -af volumedetect -f null /dev/null 2>&1 | grep volume
 - **`reicast_enable_dsp` debe estar en `enabled`.** Con `disabled` **no sale
   ningún sonido**, ni efectos ni música. Fue la causa de un "no suena nada" que
   costó varias iteraciones.
+- **`reicast_gdrom_fast_loading` debe estar en `disabled`.** Con `enabled`
+  crashea al cargar nivel (`Fatal: SH4 exception when blocked`) en Windows y en
+  la VM. No confundir con “más rápido = mejor”.
 - `reicast_hle_bios = "disabled"` para usar el BIOS real.
 - Las opciones del core viven en `config/Flycast/Flycast.opt`, **no** en
   `retroarch-core-options.cfg`.
 - `system_directory` debe ser ruta absoluta: el core no expande `~` y cae
   silenciosamente a REIOS.
 - En Windows, `audio_driver = "wasapi"` es una fuente habitual de silencio;
-  `xaudio` es más fiable.
+  **`xaudio`** es más fiable.
 - Resto de ajustes recomendados: `alpha_sorting = per-strip` (el renderer ya
-  envía en orden de pintor), `gdrom_fast_loading = enabled`, `mipmapping`,
-  `fog` y `anisotropic` desactivados (no los usamos), `internal_resolution` a
-  640x480 nativo.
+  envía en orden de pintor), `mipmapping`, `fog` y `anisotropic` desactivados
+  (no los usamos), `internal_resolution` a 640x480 nativo.
 
 ---
 
@@ -142,6 +150,8 @@ formato, flags.
 
 - Carga fichero → VRAM en trozos de 16 KB por store queues, sin buffer
   intermedio del tamaño de la textura.
+- Si `Mix_DC_IsCdLocked()` (staging de música), el lazy-load **espera** antes
+  de abrir otro fichero en `/cd` — evita abortar la copia de la Ogg.
 - Todo se emite a la lista **TR** en orden de dibujo → algoritmo del pintor.
 - `getWindowSize()` devuelve **2× el framebuffer real** (1280x960 para 640x480):
   es la convención del minport (el Wii hace `g_rmode_w * 2`).
@@ -161,18 +171,33 @@ tiles de 32x32 y sólo haría falta para pantalla partida.
   ADPCM** (`-acodec adpcm_yamaha -ac 1 -ar 22050`), formato que `snd_sfx_load`
   entiende nativo: 104 efectos ocupan 1.2 MB de los 2 MB del AICA. Reescribe
   `sounds.ini` de `.ogg` a `.wav`.
-- **Música**: streaming con `sndoggvorbis` (kos-ports **libtremor**). Todas las
-  pistas pasan a Ogg mono 22 kHz, incluidas las 54 `.spc` y la `.nsf`/`.it`, vía
-  el demuxer **libgme** de ffmpeg. Mono/22 kHz para que el decodificado entero
-  quepa junto al juego en un SH4 de 200 MHz. Los chiptunes se cortan a 120 s.
-  Para **loopear**, el mixer copia la pista a `/ram/mus.ogg` y reproduce desde
-  ahí: el loop nativo de sndoggvorbis usa `ov_raw_seek`, que falla en `/cd` pero
-  funciona en el ramdisk. No hay pump por frame (eso crasheaba el SH4).
-  Reescribe `music.ini` (`file="x.spc|0;g=2.7"` → `file="x.ogg"`).
-- `Mix_Music` lleva un flag **`streamable`** (sólo `.ogg`). Es imprescindible:
-  el motor también reproduce *efectos largos* por la API de música
-  (`Mix_LoadMUS` sobre ficheros de `sound/`), y sin el flag cada efecto llamaba
-  a `sndoggvorbis_stop()` y **mataba la música**.
+- **Canales AICA**: los índices de canal de SDL Mixer (`single-channel=1` en
+  `sounds.ini`, p. ej. `player-jump` → canal `0`) **no** se pasan a
+  `snd_sfx_play_chn()`. Los canales AICA **0/1** los reserva el stream de
+  música (`snd_sfx_chn_alloc`). Mapear SDL→AICA hacía que **cada salto matara
+  la melodía**. Ahora siempre se elige un canal libre; si el SFX es
+  single-channel se corta la instancia anterior del mismo chunk.
+- **Música**: `sndoggvorbis` (kos-ports **libtremor**). Todas las pistas pasan
+  a Ogg mono 22 kHz @ **24 kbps**, incluidas las `.spc`/`.nsf`/`.it` vía
+  **libgme**. Chiptunes se cortan a 120 s en el conversor.
+  - Al `Mix_OpenAudio` se reserva un buffer de **768 KB**.
+  - Bajo un **CD lock** (`Mix_DC_IsCdLocked`; el lazy-load de texturas espera),
+    se copia la pista entera con `fs_total` + `fs_read` y se valida `OggS`.
+  - Se reproduce con **`fmemopen` + `sndoggvorbis_start_fd`**: el loop
+    (`ov_raw_seek`) pega en RAM, nunca en el GD-ROM. Reopens reusan el mismo
+    buffer; **no se vuelve a leer `/cd`** para la pista actual.
+  - Si el stage falla al entrar al nivel, la pista queda *pending* y
+    `Mix_DC_PumpMusic()` (cada frame desde `events_dreamcast`) reintenta cuando
+    el bus está más quieto. **No** se hace stream de loop desde `/cd` (eso
+    moría a los 2–8 s con duración variable).
+  - Un pump agresivo que reabría el fichero cada frame al boot **crasheaba** el
+    SH4; el pump actual solo actúa tras cooldown y con buffer ya validado.
+- **Conversor / episodio**: convierte `music/` raíz **y** `worlds/*/music/`,
+  reescribe `music.ini` y `MF:` en `.lvlx`/`.wldx`. Sin la carpeta de episodio
+  en el CDI, el overworld puede sonar y Mushroom Pass quedar mudo.
+- `Mix_Music` lleva un flag **`streamable`** (sólo `.ogg`). El motor también
+  mete efectos largos por la API de música; sin el flag cada efecto llamaba a
+  `sndoggvorbis_stop()` y mataba la BGM.
 - **Paneo aceptado e ignorado**: todo suena centrado.
 
 ### Controles Maple — `src/control/input_dreamcast.cpp`
@@ -301,6 +326,48 @@ precargarlo todo sigue sin caber cómodamente.
 `-d` es para imágenes MSINFO 0. La nuestra usa `-C 0,11702` (MSINFO 11702,
 audio/data) y va **sin flag**. Con `-d` el CDI sale malformado y Flycast revienta
 con `std::length_error` en REIOS.
+
+### 11. Música que “dura 2–8 s” y se corta (variable)
+
+**Síntoma:** la pista del nivel suena unos segundos y muere; a veces 2 s, a
+veces 6–8 s. El fichero en el CDI dura ~87 s.
+
+**Causas encadenadas (todas reales en algún momento):**
+
+1. Stream desde `/cd` mientras el lazy-load de `.dctex` aborta el stream ISO.
+2. Copia a `/ram` truncada: `fread` devolvía 0 antes del EOF real; o un sidecar
+   `.ogg.size` leído a medias daba un tamaño falso (“270682” → “2”) y el mixer
+   aceptaba un stub.
+3. Pump que reabría desde `/cd` tras el corte → otra ráfaga corta.
+
+**Solución actual:** buffer de 768 KB + `fs_total`/`fs_read` bajo CD lock +
+`fmemopen`/`start_fd`. Las texturas esperan con `Mix_DC_IsCdLocked()`. No
+reproducir loops desde `/cd`.
+
+### 12. Saltar mata la música
+
+**Síntoma:** la BGM suena hasta que Mario salta (u otro SFX `single-channel`).
+
+**Causa:** `Mix_PlayChannelVol(0, …)` pasaba el índice SDL al AICA. El canal
+hardware 0 es del stream de `sndoggvorbis`.
+
+**Solución:** nunca mapear canales SDL → AICA; `snd_sfx_play()` elige canal
+libre. Ver sección Audio.
+
+### 13. Nivel en silencio pese a que el mapa suena
+
+**Causa:** el conversor solo trataba `music/` de la raíz; `worlds/cliche/music/`
+faltaba en el CDI y los `MF:"music/….spc"` del `.lvlx` no se reescribían a
+`.ogg`.
+
+**Solución:** `gfx-convert-dc.py` convierte cualquier `…/music/` y reescribe
+`MF:` / `music.ini`.
+
+### 14. Spam de mails “DSi CI / 3DS CI / …” en el fork
+
+Los workflows de CI multiplataforma del upstream se disparaban en cada push y
+fallaban. En este fork se **eliminaron** de `.github/workflows/` y se
+desactivaron en GitHub Actions. No re-añadirlos sin un runner que los soporte.
 
 ---
 
@@ -434,6 +501,7 @@ binutils + newlib y compilar horas en MSYS.
 - No escribir código nuevo que dependa de excepciones C++.
 - No quitar `g_use_legacy_pgex_parser = true`.
 - No poner `reicast_enable_dsp = disabled` (silencia todo el audio).
+- No poner `reicast_gdrom_fast_loading = enabled` (crash al cargar nivel).
 - No pasar `-d` a `cdi4dc` con imágenes `-C 0,11702`.
 - No usar `-m4-single` (su libstdc++ es sh2e).
 - No asumir que `/ram` admite subdirectorios.
@@ -441,3 +509,7 @@ binutils + newlib y compilar horas en MSYS.
 - No `#include <kos.h>` desde headers que entren por `globals.h`.
 - No forzar `THEXTECH_ENABLE_EDITOR=OFF` sin stubs de `EditorNPCFrame`.
 - No bisecar sobre binarios distintos: un solo build, punto de parada por `-D`.
+- No streamear música en loop desde `/cd` ni reabrir Ogg del GD-ROM cada frame
+  (stubs de 2–8 s / crash SH4).
+- No pasar índices de canal SDL Mixer a `snd_sfx_play_chn` (pisan el stream).
+- No volver a meter los workflows CI multiplataforma en este fork sin necesidad.

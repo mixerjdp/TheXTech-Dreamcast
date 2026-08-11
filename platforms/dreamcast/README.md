@@ -24,13 +24,15 @@ efectos y música.
 | Texto / fuentes | OK — menú legible |
 | Selección de episodio y gameplay | OK — confirmado con mando |
 | Viewport | OK — llena los 640x480, sin bordes |
-| Efectos de sonido | OK — AICA vía `snd_sfx` (ADPCM Yamaha) |
-| Música | OK — streaming Ogg con `sndoggvorbis` (kos-ports libtremor) |
+| Efectos de sonido | OK — AICA vía `snd_sfx` (ADPCM Yamaha); canales SDL ≠ AICA |
+| Música | OK — Ogg en buffer RAM + `fmemopen`/`sndoggvorbis` (loop sin `/cd`) |
+| Música de episodio | OK — `worlds/*/music/` + `MF:` en `.lvlx` convertidos a `.ogg` |
 | Controles Maple | OK (hotkeys sin mapear: no sobran botones en el pad) |
 | Guardado persistente | Pendiente — `/ram` es volátil, haría falta VMU |
 | Rendimiento | Mejorable — todo va a la lista TR del PVR |
+| CI GitHub Actions | Desactivado en el fork (workflows multiplataforma eliminados) |
 
-Imagen lista para usar: `dist/dreamcast/thextech_dc.cdi`
+Imagen lista para usar: `dist/dreamcast/thextech_dc.cdi` (~180 MB con `cliche` + música)
 
 ## Build
 
@@ -66,12 +68,18 @@ Requiere BIOS real en `~/.config/retroarch/system/dc/dc_boot.bin` en la VM, y
 ⚠️ **`reicast_gdrom_fast_loading` debe estar en `disabled`** o crashea al
 cargar nivel (`Fatal: SH4 exception when blocked`).
 
+⚠️ En RetroArch Windows, `audio_driver = "xaudio"` suele funcionar mejor que
+`wasapi` (silencio total con wasapi es habitual).
+
 ## Backend
 
 - `src/core/dreamcast/` — render PVR, window, events, msgbox, power, init de KOS,
   sustitutos del runtime C++, sonda de arranque y reportero de crash
 - `src/control/input_dreamcast.*` — mando Maple
-- `lib/sdl_proxy/dreamcast/` — timers y mixer (AICA + streaming Ogg)
+- `lib/sdl_proxy/dreamcast/` — timers y mixer (AICA + Ogg en RAM vía tremor)
 - `lib/AppPath/private/app_path_dreamcast.cpp` — `/cd/` + `/ram/` plano
 - `utils/convertkit/gfx-convert-dc.py` — conversor de gráficos, efectos y música
+  (incluye `music/` de episodio y reescritura de `MF:` en niveles)
 - CMake: `-DDREAMCAST=ON` + `cmake/dreamcast.toolchain.cmake`
+
+Detalle operativo (trampas, audio, pendiente): **[HANDOFF.md](HANDOFF.md)**.
