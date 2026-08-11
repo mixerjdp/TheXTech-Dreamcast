@@ -363,6 +363,14 @@ if(DREAMCAST)
     set(THEXTECH_ENABLE_TTF_SUPPORT OFF CACHE BOOL "" FORCE)
     set(THEXTECH_ENABLE_AUDIO_FX OFF CACHE BOOL "" FORCE)
     set(THEXTECH_ENABLE_WIP_FEATURES OFF CACHE BOOL "" FORCE)
+    # DirManager probes for these with check_function_exists and would find both:
+    # KallistiOS's newlib *declares* fstatat and realpath but does not provide
+    # linkable symbols, so the build fails at link time. Seeding the cache makes
+    # check_function_exists skip the probe (it honours an already-defined cache
+    # entry), which keeps the fix here instead of patching the submodule.
+    set(DIRMAN_HAS_FSSTATAT FALSE CACHE INTERNAL "KOS declares fstatat but does not link it")
+    set(DIRMAN_HAS_REALPATH FALSE CACHE INTERNAL "KOS declares realpath but does not link it")
+
     # PVR compares positive depth values, so the render planes must not be signed.
     # No THEXTECH_PRELOAD_LEVELS: preloading every world and level up front does
     # not fit 16 MB, and the scan crashes partway through on this hardware.

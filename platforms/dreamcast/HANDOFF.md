@@ -363,7 +363,33 @@ faltaba en el CDI y los `MF:"music/….spc"` del `.lvlx` no se reescribían a
 **Solución:** `gfx-convert-dc.py` convierte cualquier `…/music/` y reescribe
 `MF:` / `music.ini`.
 
-### 14. Spam de mails “DSi CI / 3DS CI / …” en el fork
+### 14. `fstatat`/`realpath`: el árbol no compilaba desde un clon limpio
+
+**Síntoma:** referencia sin resolver al enlazar, sólo en clones nuevos. En la
+máquina donde se desarrolló no pasaba, porque el submódulo `DirManager` tenía un
+parche local que **no viajaba al repo**.
+
+**Causa:** newlib de KOS **declara** `fstatat` y `realpath` pero no provee
+símbolo enlazable. `dirman.cmake` los busca con `check_function_exists`, los
+encuentra, y define `-DDIRMAN_HAS_FSSTATAT` / `-DDIRMAN_HAS_REALPATH`.
+
+**Solución (sin tocar el submódulo):** sembrar las variables de caché en el
+bloque `DREAMCAST` de `CMakeLists.txt`, antes del `include(...dirman.cmake)`.
+`check_function_exists` respeta una entrada de caché ya definida y se salta la
+prueba:
+
+```cmake
+set(DIRMAN_HAS_FSSTATAT FALSE CACHE INTERNAL "KOS declares fstatat but does not link it")
+set(DIRMAN_HAS_REALPATH FALSE CACHE INTERNAL "KOS declares realpath but does not link it")
+```
+
+Verificado configurando y compilando en un árbol de build nuevo, con el
+submódulo intacto: 0 referencias sin resolver.
+
+**Lección general:** parchear un submódulo arregla tu disco y rompe el repo. Todo
+lo que el port necesite tiene que vivir en este árbol.
+
+### 15. Spam de mails “DSi CI / 3DS CI / …” en el fork
 
 Los workflows de CI multiplataforma del upstream se disparaban en cada push y
 fallaban. En este fork se **eliminaron** de `.github/workflows/` y se
@@ -504,6 +530,9 @@ binutils + newlib y compilar horas en MSYS.
 - No poner `reicast_gdrom_fast_loading = enabled` (crash al cargar nivel).
 - No pasar `-d` a `cdi4dc` con imágenes `-C 0,11702`.
 - No usar `-m4-single` (su libstdc++ es sh2e).
+- No parchear submódulos de `3rdparty/`: el arreglo no llega al repo y el clon
+  limpio deja de compilar (ver trampa 14).
+- No mapear índices de canal de SDL a canales del AICA (ver trampa 12).
 - No asumir que `/ram` admite subdirectorios.
 - No reintroducir `__16M__` en el define de Dreamcast.
 - No `#include <kos.h>` desde headers que entren por `globals.h`.
