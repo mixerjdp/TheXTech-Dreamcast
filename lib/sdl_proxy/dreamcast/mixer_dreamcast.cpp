@@ -1,28 +1,27 @@
 /*
  * TheXTech Dreamcast — sound effects on the AICA.
  *
- * Implements the subset of the SDL_mixer-ish API that TheXTech actually calls,
- * on top of KallistiOS's snd_sfx manager.
+ * SOUND EFFECTS: host-converted Yamaha ADPCM WAVs via snd_sfx.
  *
- * SOUND EFFECTS work: the host converter turns the gamepack's .ogg effects into
- * Yamaha ADPCM WAVs (see utils/convertkit/gfx-convert-dc.py), which is one of
- * the formats snd_sfx_load understands natively, and which fits ~100 effects
- * into the AICA's 2 MB of sound RAM.
+ * MUSIC: sndoggvorbis (libtremor). Looping seeks (ov_raw_seek) are unreliable
+ * on /cd and GD-ROM contention used to yield 2–8 s stubs of variable length.
  *
- * MUSIC streams through KallistiOS's sndoggvorbis (kos-ports libtremor), which
- * decodes Ogg Vorbis on the SH4 with integer maths. The host converter turns
- * every track — including the SPC/NSF/IT ones, via ffmpeg's libgme demuxer —
- * into mono 22 kHz Ogg, which keeps the decode cost low enough to sit
- * alongside the game.
- *
- * Panning is accepted and ignored — everything plays centred. The engine's
- * spatial audio therefore has no effect, but nothing breaks.
+ * Strategy that actually sticks:
+ *  1. Reserve a 768 KB buffer at Mix_OpenAudio.
+ *  2. Under a CD lock (textures wait), copy the whole Ogg into that buffer
+ *     using KOS fs_total + fs_read, verifying OggS + length.
+ *  3. Play with fmemopen() + sndoggvorbis_start_fd() — seeks hit RAM, never
+ *     the GD-ROM. Reopens reuse the SAME buffer; we never re-read /cd for the
+ *     current track.
+ *  4. Looping tracks never stream from /cd.
  */
 
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
 #include <new>
 #include <string>
+#include <malloc.h>
 
 #include <kos.h>
 #include <dc/sound/sound.h>
@@ -42,6 +41,8 @@
 struct Mix_Chunk
 {
     sfxhnd_t sfx;
+    //! Last AICA channel this chunk used (for SDL "single-channel" SFX).
+    int last_chn = -1;
 };
 
 struct Mix_Music
@@ -58,6 +59,62 @@ struct Mix_Music
 };
 
 static bool s_audio_up = false;
+
+// Biggest episode track today is ~400 KB at 24 kbps. Reserve once at boot.
+static const std::size_t k_music_stage_cap = 768u * 1024u;
+static unsigned char *s_music_stage_buf = nullptr;
+static std::size_t s_music_buf_len = 0; // valid bytes currently in the buffer
+
+// >0 while music is reading the GD-ROM — render must not open /cd textures.
+static volatile int s_cd_lock = 0;
+
+static char s_music_src_path[256];
+static bool s_music_loop = false;
+static bool s_music_active = false;
+static bool s_music_pending = false;
+static bool s_music_from_mem = false;
+static int  s_music_reopen_cooldown = 0;
+static int  s_music_stage_cooldown = 0;
+
+bool Mix_DC_IsCdLocked(void)
+{
+    return s_cd_lock > 0;
+}
+
+static void s_cd_lock_acquire()
+{
+    ++s_cd_lock;
+}
+
+static void s_cd_lock_release()
+{
+    if(s_cd_lock > 0)
+        --s_cd_lock;
+}
+
+static void s_clear_music_watch()
+{
+    s_music_src_path[0] = '\0';
+    s_music_loop = false;
+    s_music_active = false;
+    s_music_pending = false;
+    s_music_from_mem = false;
+    s_music_reopen_cooldown = 0;
+    s_music_stage_cooldown = 0;
+    // Keep s_music_buf_len — buffer can be reused/replaced on next load.
+}
+
+static void s_watch_music(const char *src_path, bool loop, bool from_mem, bool pending)
+{
+    std::strncpy(s_music_src_path, src_path, sizeof(s_music_src_path) - 1);
+    s_music_src_path[sizeof(s_music_src_path) - 1] = '\0';
+    s_music_loop = loop;
+    s_music_active = true;
+    s_music_from_mem = from_mem;
+    s_music_pending = pending;
+    s_music_reopen_cooldown = pending ? 0 : 90;
+    s_music_stage_cooldown = pending ? 60 : 0; // let textures settle before first pending try
+}
 
 // Counters for the startup diagnostic (see THEXTECH_DC_BOOT_PROBE).
 int g_dc_sfx_loaded = 0;
@@ -98,7 +155,13 @@ int Mix_OpenAudio(int frequency, Uint16 format, int channels, int chunksize)
     // Spins up the Ogg streaming thread used for music.
     sndoggvorbis_init();
 
+    // Reserve the staging scratchpad while the heap is still empty. Doing this
+    // at StartMusic (after OpenLevel) often fails malloc on 16 MB retail.
+    if(!s_music_stage_buf)
+        s_music_stage_buf = static_cast<unsigned char *>(memalign(32, k_music_stage_cap));
+
     s_audio_up = true;
+    s_clear_music_watch();
 
     return 0;
 }
@@ -118,6 +181,7 @@ void Mix_CloseAudio()
     if(!s_audio_up)
         return;
 
+    s_clear_music_watch();
     sndoggvorbis_stop();
     sndoggvorbis_shutdown();
     snd_sfx_stop_all();
@@ -194,10 +258,17 @@ int Mix_PlayChannelVol(int which, Mix_Chunk* chunk, int loops, int volume)
     const int vol = s_volume(volume);
     const int pan = 128; // centred
 
-    if(which < 0)
-        return snd_sfx_play(chunk->sfx, vol, pan);
+    // CRITICAL: SDL mixer channel indices (0, 1, … from single-channel=1 in
+    // sounds.ini) are NOT AICA hardware channels. Channels 0/1 are owned by
+    // sndoggvorbis's stream — feeding them to snd_sfx_play_chn() is what made
+    // every jump cut the music. Always auto-pick a free SFX channel.
+    if(which >= 0 && chunk->last_chn >= 0)
+        snd_sfx_stop(chunk->last_chn);
 
-    return snd_sfx_play_chn(which, chunk->sfx, vol, pan);
+    const int chn = snd_sfx_play(chunk->sfx, vol, pan);
+    if(chn >= 0)
+        chunk->last_chn = chn;
+    return chn;
 }
 
 int Mix_PlayChannel(int channel, Mix_Chunk* chunk, int loops)
@@ -210,10 +281,11 @@ int Mix_HaltChannel(int channel)
     if(!s_audio_up)
         return 0;
 
+    // channel < 0 => stop all SFX (KOS already spares stream-owned channels).
+    // channel >= 0 is an SDL mixer index, not an AICA channel — do not call
+    // snd_sfx_stop(channel) or we kill the music stream on ch 0/1.
     if(channel < 0)
         snd_sfx_stop_all();
-    else
-        snd_sfx_stop(channel);
 
     return 0;
 }
@@ -305,7 +377,10 @@ int Mix_HaltMusicStream(Mix_Music* music)
     // A non-streamable handle never started anything; stopping on its behalf
     // would cut off the real music.
     if(s_audio_up && music && music->streamable)
+    {
+        s_clear_music_watch();
         sndoggvorbis_stop();
+    }
     return 0;
 }
 
@@ -319,6 +394,10 @@ int Mix_PlayingMusicStream(Mix_Music* music)
 {
     if(!s_audio_up || !music || !music->streamable)
         return 0;
+
+    // Pending = StartMusic accepted; in-memory copy still in flight.
+    if(s_music_pending && s_music_active)
+        return 1;
 
     return sndoggvorbis_isplaying();
 }
@@ -360,17 +439,237 @@ int Mix_PlayMusic(Mix_Music* music, int loops)
     return Mix_PlayMusicStream(music, loops);
 }
 
+static long s_expected_music_bytes(const char *ogg_path)
+{
+    file_t fd = fs_open(ogg_path, O_RDONLY);
+    if(fd < 0)
+        return -1;
+
+    const ssize_t total = fs_total(fd);
+    fs_close(fd);
+    return (total > 0) ? static_cast<long>(total) : -1;
+}
+
+static bool s_ogg_looks_sane(const unsigned char *buf, std::size_t expected)
+{
+    if(expected < 24u * 1024u)
+        return false;
+    if(!(buf[0] == 'O' && buf[1] == 'g' && buf[2] == 'g' && buf[3] == 'S'))
+        return false;
+
+    // Last Ogg page should also start with OggS somewhere near the end.
+    const std::size_t tail_from = (expected > 64u * 1024u) ? (expected - 64u * 1024u) : 0;
+    for(std::size_t i = expected - 4; i > tail_from; --i)
+    {
+        if(buf[i] == 'O' && buf[i + 1] == 'g' && buf[i + 2] == 'g' && buf[i + 3] == 'S')
+            return true;
+    }
+    // Single-page tiny files still OK if header matched and size is large enough.
+    return expected < 48u * 1024u;
+}
+
+static bool s_read_exact(const char *src_path, unsigned char *dst, std::size_t expected, int reopen_budget)
+{
+    std::size_t got = 0;
+
+    while(got < expected && reopen_budget-- > 0)
+    {
+        file_t fd = fs_open(src_path, O_RDONLY);
+        if(fd < 0)
+        {
+            thd_sleep(20);
+            continue;
+        }
+
+        if(fs_total(fd) != static_cast<ssize_t>(expected))
+        {
+            fs_close(fd);
+            thd_sleep(20);
+            continue;
+        }
+
+        if(got > 0 && fs_seek(fd, static_cast<off_t>(got), SEEK_SET) < 0)
+        {
+            fs_close(fd);
+            thd_sleep(20);
+            continue;
+        }
+
+        int zero_streak = 0;
+        while(got < expected)
+        {
+            const ssize_t n = fs_read(fd, dst + got, expected - got);
+            if(n < 0)
+                break;
+            if(n == 0)
+            {
+                if(++zero_streak > 40)
+                    break;
+                thd_sleep(5);
+                if(fs_seek(fd, static_cast<off_t>(got), SEEK_SET) < 0)
+                    break;
+                continue;
+            }
+            zero_streak = 0;
+            got += static_cast<std::size_t>(n);
+        }
+
+        fs_close(fd);
+
+        if(got == expected)
+            return s_ogg_looks_sane(dst, expected);
+
+        thd_sleep(30);
+    }
+
+    return false;
+}
+
+//! Copy the whole track into s_music_stage_buf. CD lock held by caller.
+static bool s_load_music_buf(const char *src_path, int max_attempts)
+{
+    if(!s_music_stage_buf)
+        return false;
+
+    const long expected_l = s_expected_music_bytes(src_path);
+    if(expected_l <= 0 || static_cast<std::size_t>(expected_l) > k_music_stage_cap)
+        return false;
+
+    const std::size_t expected = static_cast<std::size_t>(expected_l);
+    if(expected < 24u * 1024u)
+        return false;
+
+    for(int attempt = 0; attempt < max_attempts; ++attempt)
+    {
+        if(attempt > 0)
+            thd_sleep(40);
+
+        if(s_read_exact(src_path, s_music_stage_buf, expected,
+                        max_attempts > 1 ? 80 : 10))
+        {
+            s_music_buf_len = expected;
+            return true;
+        }
+    }
+
+    s_music_buf_len = 0;
+    return false;
+}
+
+static bool s_play_mem(bool loop)
+{
+    if(!s_music_stage_buf || s_music_buf_len == 0)
+        return false;
+
+    sndoggvorbis_stop();
+    // start_fd requires STATUS_READY; stop is async on the ogg thread.
+    sndoggvorbis_wait_start();
+
+    FILE *f = fmemopen(s_music_stage_buf, s_music_buf_len, "rb");
+    if(!f)
+        return false;
+
+    if(sndoggvorbis_start_fd(f, loop ? 1 : 0) != 0)
+        return false;
+
+    return true;
+}
+
+void Mix_DC_PumpMusic()
+{
+    if(!s_audio_up || !s_music_active || s_music_src_path[0] == '\0')
+        return;
+
+    if(s_music_reopen_cooldown > 0)
+        --s_music_reopen_cooldown;
+    if(s_music_stage_cooldown > 0)
+        --s_music_stage_cooldown;
+
+    if(s_music_pending)
+    {
+        if(s_music_stage_cooldown > 0)
+            return;
+
+        s_music_stage_cooldown = 45;
+        s_cd_lock_acquire();
+        const bool ok = s_load_music_buf(s_music_src_path, /*max_attempts=*/1);
+        s_cd_lock_release();
+        if(!ok)
+            return;
+
+        if(!s_play_mem(/*loop=*/true))
+        {
+            s_music_active = false;
+            s_music_pending = false;
+            return;
+        }
+
+        s_music_pending = false;
+        s_music_from_mem = true;
+        s_music_reopen_cooldown = 90;
+        return;
+    }
+
+    if(!s_music_from_mem)
+        return;
+
+    if(sndoggvorbis_isplaying())
+        return;
+
+    if(!s_music_loop || s_music_reopen_cooldown > 0)
+        return;
+
+    // Reopen from the in-memory copy — never touch /cd again for this track.
+    s_music_reopen_cooldown = 60;
+    if(!s_play_mem(/*loop=*/true))
+        s_music_active = false;
+}
+
 int Mix_PlayMusicStream(Mix_Music* music, int loops)
 {
     if(!s_audio_up || !music || !music->streamable)
         return -1;
 
     sndoggvorbis_stop();
+    s_clear_music_watch();
 
-    // SDL uses -1 for "forever"; sndoggvorbis just wants a flag.
-    int rc = sndoggvorbis_start(music->path.c_str(), loops != 0);
+    const bool want_loop = (loops != 0);
+    const char *src_path = music->path.c_str();
 
-    return rc == 0 ? 0 : -1;
+    if(want_loop)
+    {
+        s_cd_lock_acquire();
+        const bool ok = s_load_music_buf(src_path, /*max_attempts=*/12);
+        s_cd_lock_release();
+
+        if(ok && s_play_mem(/*loop=*/true))
+        {
+            s_watch_music(src_path, true, true, false);
+            return 0;
+        }
+
+        // Stay silent until the pump can load a clean copy with the bus quiet.
+        s_music_buf_len = 0;
+        s_watch_music(src_path, true, false, true);
+        return 0;
+    }
+
+    // One-shot jingles: still prefer memory so seeks/stop are clean; fall back
+    // to a single /cd play only if the file is tiny enough to risk it.
+    s_cd_lock_acquire();
+    const bool ok = s_load_music_buf(src_path, /*max_attempts=*/4);
+    s_cd_lock_release();
+    if(ok && s_play_mem(/*loop=*/false))
+    {
+        s_watch_music(src_path, false, true, false);
+        return 0;
+    }
+
+    sndoggvorbis_wait_start();
+    if(sndoggvorbis_start(src_path, /*loop=*/0) != 0)
+        return -1;
+    s_watch_music(src_path, false, false, false);
+    return 0;
 }
 
 int Mix_SetFreeOnStop(Mix_Music* music, int free_on_stop)

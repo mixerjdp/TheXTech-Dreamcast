@@ -164,9 +164,11 @@ tiles de 32x32 y sólo haría falta para pantalla partida.
 - **Música**: streaming con `sndoggvorbis` (kos-ports **libtremor**). Todas las
   pistas pasan a Ogg mono 22 kHz, incluidas las 54 `.spc` y la `.nsf`/`.it`, vía
   el demuxer **libgme** de ffmpeg. Mono/22 kHz para que el decodificado entero
-  quepa junto al juego en un SH4 de 200 MHz. Los chiptunes no acaban solos: se
-  cortan a 120 s y el motor los repite. Reescribe `music.ini`
-  (`file="x.spc|0;g=2.7"` → `file="x.ogg"`).
+  quepa junto al juego en un SH4 de 200 MHz. Los chiptunes se cortan a 120 s.
+  Para **loopear**, el mixer copia la pista a `/ram/mus.ogg` y reproduce desde
+  ahí: el loop nativo de sndoggvorbis usa `ov_raw_seek`, que falla en `/cd` pero
+  funciona en el ramdisk. No hay pump por frame (eso crasheaba el SH4).
+  Reescribe `music.ini` (`file="x.spc|0;g=2.7"` → `file="x.ogg"`).
 - `Mix_Music` lleva un flag **`streamable`** (sólo `.ogg`). Es imprescindible:
   el motor también reproduce *efectos largos* por la API de música
   (`Mix_LoadMUS` sobre ficheros de `sound/`), y sin el flag cada efecto llamaba

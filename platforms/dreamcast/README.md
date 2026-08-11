@@ -63,6 +63,9 @@ Requiere BIOS real en `~/.config/retroarch/system/dc/dc_boot.bin` en la VM, y
 
 ⚠️ **`reicast_enable_dsp` debe estar en `enabled`** o no sale ningún sonido.
 
+⚠️ **`reicast_gdrom_fast_loading` debe estar en `disabled`** o crashea al
+cargar nivel (`Fatal: SH4 exception when blocked`).
+
 ## Backend
 
 - `src/core/dreamcast/` — render PVR, window, events, msgbox, power, init de KOS,

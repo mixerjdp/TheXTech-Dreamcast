@@ -56,7 +56,8 @@ AUDIO_EXTS = ('.ogg', '.mp3', '.wav', '.spc', '.mid', '.xm', '.it', '.mod', '.s3
 # through its libgme demuxer.
 MUSIC_EXTS = ('.spc', '.nsf', '.it', '.ogg', '.mod', '.xm', '.s3m', '.mid', '.mp3', '.flac')
 
-# Chiptunes never end on their own; cap them and let the engine loop.
+# Chiptunes never end on their own; cap them and let the Dreamcast mixer
+# reopen the file when it hits EOF (sndoggvorbis seeks on /cd are unreliable).
 MUSIC_SECONDS = 120
 
 # Prefixes the engine can batch-load through graphics.list
@@ -380,15 +381,21 @@ def convert_music(src, dst):
     Everything becomes Ogg because that is what sndoggvorbis can stream, and
     mono at 22 kHz keeps tremor's integer decode cheap enough to run beside the
     game on a 200 MHz SH4. SPC/NSF/IT come in through ffmpeg's libgme demuxer.
+
+    Also writes dst + '.size' (ASCII byte length). The Dreamcast mixer needs an
+    authoritative length so a false GD-ROM EOF can't leave a ~4 s stub on /ram.
     """
     result = subprocess.run(
         ['ffmpeg', '-y', '-loglevel', 'error', '-i', src,
          '-t', str(MUSIC_SECONDS), '-ac', '1', '-ar', '22050',
-         '-c:a', 'libvorbis', '-q:a', '1', dst],
+         '-c:a', 'libvorbis', '-b:a', '24k', dst],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode('utf-8', 'replace').strip()[:200])
+
+    with open(dst + '.size', 'w', encoding='ascii') as f:
+        f.write(str(os.path.getsize(dst)))
 
 
 def rewrite_music_ini(src, dst):
@@ -407,6 +414,31 @@ def rewrite_music_ini(src, dst):
         return 'file="%s.ogg"' % os.path.splitext(name)[0]
 
     data = _re.sub(r'file="([^"]+)"', fix, data)
+
+    with open(dst, 'wb') as f:
+        f.write(data.encode('utf-8', 'surrogateescape'))
+
+
+def rewrite_level_music_ext(src, dst):
+    """Retarget embedded music paths in level/world files to .ogg.
+
+    PGE-X sections use MF:"music/track.spc" or MF:"music/track.spc|0;g=…".
+    After conversion only the .ogg exists, so the extension (and any GME
+    tail) must be rewritten or Mix_LoadMUS fails and the section is silent.
+    """
+    import re as _re
+
+    with open(src, 'rb') as f:
+        data = f.read().decode('utf-8', 'surrogateescape')
+
+    def fix(m):
+        path = m.group(1).split('|', 1)[0]
+        stem, ext = os.path.splitext(path)
+        if ext.lower() in MUSIC_EXTS:
+            path = stem + '.ogg'
+        return 'MF:"%s"' % path
+
+    data = _re.sub(r'MF:"([^"]*)"', fix, data)
 
     with open(dst, 'wb') as f:
         f.write(data.encode('utf-8', 'surrogateescape'))
@@ -523,7 +555,13 @@ def main():
                     print(f'  ... {n_img} textures')
                 continue
 
-            if bool(parts) and parts[0] == 'music' and low.endswith(MUSIC_EXTS):
+            # Top-level music/ AND episode music/ (e.g. worlds/cliche/music/).
+            # Without this, level MF: paths like music/mrpg-….spc are missing
+            # on the CDI and the section plays in silence.
+            in_music_dir = bool(parts) and (
+                parts[0] == 'music' or parts[-1] == 'music')
+
+            if in_music_dir and low.endswith(MUSIC_EXTS):
                 if args.no_music:
                     n_skip += 1
                     continue
@@ -542,6 +580,13 @@ def main():
 
             if low == 'music.ini' and not args.no_music:
                 rewrite_music_ini(src, os.path.join(outpath, fn))
+                n_copy += 1
+                continue
+
+            if low.endswith(('.lvlx', '.wldx', '.lvl', '.wld')) and not args.no_music:
+                # Section/world music paths embed the original extension
+                # (MF:"music/foo.spc"); retarget to the converted .ogg.
+                rewrite_level_music_ext(src, os.path.join(outpath, fn))
                 n_copy += 1
                 continue
 

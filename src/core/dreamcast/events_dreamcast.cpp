@@ -10,6 +10,7 @@
 
 #include "core/events.h"
 #include "globals.h"
+#include "sdl_proxy/mixer.h"
 
 namespace XEvents
 {
@@ -25,6 +26,8 @@ void quit()
 
 void doEvents()
 {
+    Mix_DC_PumpMusic();
+
     maple_device_t *cont = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
     if(!cont)
         return;

@@ -140,6 +140,13 @@ extern int Mix_FadeOutMusic(int fadeInMs);
 
 extern int Mix_PlayMusicStream(Mix_Music *music, int loops);
 
+#ifdef __DREAMCAST__
+/* Finish pending in-memory Ogg stage / reopen after EOF. */
+extern void Mix_DC_PumpMusic(void);
+/* True while music holds the GD-ROM — texture loader must wait. */
+extern bool Mix_DC_IsCdLocked(void);
+#endif
+
 extern int Mix_PausedMusicStream(Mix_Music *music);
 extern int Mix_PauseMusicStream(Mix_Music *music);
 extern int Mix_ResumeMusicStream(Mix_Music *music);

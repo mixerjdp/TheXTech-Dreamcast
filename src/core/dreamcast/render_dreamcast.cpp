@@ -33,6 +33,7 @@
 #include "core/render.h"
 #include "core/render_planes.h"
 #include "core/minport/render_minport_shared.hpp"
+#include "sdl_proxy/mixer.h"
 
 namespace XRender
 {
@@ -123,6 +124,11 @@ static pvr_ptr_t s_vram_alloc(size_t bytes)
  */
 static bool s_load_dctex(StdPicture &target)
 {
+    // Music staging owns the GD-ROM exclusively; waiting avoids aborting its
+    // ISO stream mid-copy (that was the variable 2–8 s music stubs).
+    for(int i = 0; Mix_DC_IsCdLocked() && i < 1000; ++i)
+        thd_sleep(1);
+
     alignas(32) static uint8_t s_chunk[16 * 1024];
 
     const std::string &path = target.l.path;
