@@ -24,7 +24,7 @@ episodio (`cliche`), se carga el nivel y se juega a ~60 FPS ocupando los
 | Efectos de sonido | OK | 104 cargados en AICA; saltos ya no matan la música |
 | Música (mapa + nivel) | OK | Buffer RAM + `fmemopen`; pistas de episodio en CDI |
 | Controles Maple | OK | Jugado con mando |
-| Guardado persistente | **Falta** | `/ram` es volátil |
+| Guardado persistente | OK | VMU; cae a `/ram` si no hay tarjeta con hueco |
 | Rendimiento | **Mejorable** | Baja de 60 en escenas cargadas |
 | CI remoto | **Apagado** | Workflows multiplataforma borrados del fork |
 
@@ -483,11 +483,53 @@ el PVR resuelve con test de alfa y ordenación por Z. Habría que:
    toque, cuidando que el orden entre listas no rompa el layering.
 3. Medir antes y después con el contador de FPS de RetroArch.
 
-### P1 — Guardado persistente (VMU)
+### ~~P1 — Guardado persistente (VMU)~~ (hecho)
 
-`/ram` se pierde al apagar. Hay que escribir en VMU con `vmufs` de KOS. Ojo:
-128 KB por bloque de memoria, así que habrá que recortar o comprimir las
-partidas guardadas.
+Las partidas se guardan en VMU y sobreviven al apagado. Costó cuatro fallos
+encadenados, cada uno tapando al siguiente; van documentados abajo porque
+ninguno se ve desde el síntoma ("le doy guardar y no pasa nada").
+
+**1. `force-portable` descartaba la ruta de la plataforma.** El `thextech.ini`
+del CD trae `force-portable = true`, y `AppPathManager::initString()` hacía
+`if(m_isPortable) text = defValue;` — o sea que ignoraba lo que devolviera
+`AppPathP::gamesavesRoot()`. Los guardados acababan en `/ram/gamesaves/<episodio>/`,
+un subdirectorio que el ramdisk **no puede crear** porque su VFS no implementa
+`mkdir`. No se escribía nada, ni siquiera en memoria volátil. Arreglado en
+`app_path.cpp`: en Dreamcast la ruta de la plataforma gana, porque ahí no es una
+preferencia sino lo que el hardware permite.
+
+**2. Nombres y subdirectorios.** El VMU es plano y `fs_vmu.c` corta los nombres
+a 12 caracteres (`strncpy(fd->name, path + 4, 12)`). La ruta normal
+`<gamesaves>/<dir episodio>/<mundo>-save1.savx` no se puede expresar.
+`makeGameSavePath()` en Dreamcast devuelve `TXT` + 8 hex de un FNV-1a de
+`"<ruta episodio>|<archivo>"` = 11 caracteres, plano y estable entre arranques.
+
+**3. La tarjeta puede estar llena.** Una VMU tiene 200 bloques de 512 B. Si no
+hay hueco, la escritura falla en silencio. `app_path_dreamcast.cpp` recorre
+todas las tarjetas con `maple_enum_type(i, MAPLE_FUNC_MEMCARD)`, **verifica que
+se puede escribir** con una sonda de 512 B que crea, lee y borra, y cae al
+ramdisk si ninguna sirve. Para probar en Flycast hace falta
+`reicast_per_content_vmus = "VMU A1"`, que da una tarjeta propia por juego;
+con la compartida llena el port no tiene dónde escribir y parece un bug del
+motor.
+
+**4. El relleno de bloque rompía el parser.** Un `.savx` de 941 bytes ocupa 2
+bloques y KOS lo devuelve como **1024 bytes**: el texto más 83 bytes de ceros.
+PGE-X falla al parsear esa cola y `FindSaves()` muestra `NEW GAME` con la
+partida intacta en la tarjeta. `s_dreamcastReadSave()` lee el archivo, corta en
+el primer NUL y usa `ReadExtendedSaveFileRaw()`.
+
+Nota al depurar: los bloques de un archivo se encadenan en orden **descendente**
+(199 → 198 → ...). Leer 199 y su contiguo hace parecer que el archivo está
+truncado cuando no lo está.
+
+Efecto secundario: los **ajustes** también persisten ahora, porque sufrían
+exactamente el mismo problema de ruta del punto 1.
+
+Pendiente menor: el disco declara `Product No: T0000`, así que la VMU por juego
+se llama `T0000.A1.bin`. Otro homebrew con el ID por defecto compartiría
+tarjeta. Cambiarlo en `build_engine_image.sh` invalidaría las partidas
+existentes.
 
 ### P1 — Memoria
 

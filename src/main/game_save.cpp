@@ -1,4 +1,4 @@
-/*
+﻿/*
  * TheXTech - A platform game engine ported from old source code for VB6
  *
  * Copyright (c) 2009-2011 Andrew Spinks, original VB6 code
@@ -28,6 +28,7 @@
 #include "../script/luna/lunavarbank.h"
 #endif
 
+#include <cstdio>
 #include <Utils/files.h>
 #include <DirManager/dirman.h>
 #include <AppPath/app_path.h>
@@ -41,8 +42,81 @@
 #include "menu_main.h"
 #include "saved_layers.h"
 
+#ifdef __DREAMCAST__
+/*
+ * A VMU has no subdirectories and fs_vmu.c truncates names to 12 characters,
+ * so the usual "<gamesaves>/<episode dir>/<world file>-save1.savx" cannot be
+ * expressed: the mkdir fails and the write goes nowhere. Hash the identity of
+ * the file down to a flat name that fits instead.
+ *
+ * FNV-1a over "<episode path>|<save file>", so both the episode and the slot
+ * (which lives inside saveFile, e.g. "save2.savx") pick different names, and
+ * the same episode always maps back to the same one across boots.
+ */
+static std::string s_dreamcastSavePath(const std::string &epPath, const std::string &saveFile)
+{
+    uint32_t hash = 2166136261u;
+
+    for(char c : epPath)
+        hash = (hash ^ (uint8_t)c) * 16777619u;
+
+    hash = (hash ^ (uint8_t)'|') * 16777619u;
+
+    for(char c : saveFile)
+        hash = (hash ^ (uint8_t)c) * 16777619u;
+
+    // "TXT" + 8 hex digits = 11 characters, one under the VMU limit.
+    char name[16];
+    std::snprintf(name, sizeof(name), "TXT%08lX", (unsigned long)hash);
+    std::string ret = AppPathManager::gameSaveRootDir() + name;
+
+    pLogDebug("Save data path for ep [%s], file [%s] -> [%s]",
+              epPath.c_str(), saveFile.c_str(), ret.c_str());
+
+    return ret;
+}
+
+/*
+ * A VMU allocates in 512-byte blocks and KOS reports the file as that rounded
+ * size, so a 941-byte save reads back as 1024 bytes: the real text followed by
+ * NUL padding. The PGE-X parser chokes on that trailing garbage and reports a
+ * failure, which FindSaves() shows as "NEW GAME" even though the save on the
+ * card is perfectly intact.
+ *
+ * Read it ourselves and cut at the padding before handing it to the parser.
+ */
+static bool s_dreamcastReadSave(const std::string &path, GamesaveData &out)
+{
+    std::FILE *f = std::fopen(path.c_str(), "rb");
+    if(!f)
+        return false;
+
+    std::string raw;
+    char buf[512];
+    size_t got;
+
+    while((got = std::fread(buf, 1, sizeof(buf), f)) > 0)
+        raw.append(buf, got);
+
+    std::fclose(f);
+
+    // Cut at the block padding. A .savx is plain text and never contains NULs.
+    size_t end = raw.find('\0');
+    if(end != std::string::npos)
+        raw.resize(end);
+
+    if(raw.empty())
+        return false;
+
+    return FileFormats::ReadExtendedSaveFileRaw(raw, path, out);
+}
+#endif // __DREAMCAST__
+
 std::string makeGameSavePath(std::string epPath, std::string saveFile)
 {
+#ifdef __DREAMCAST__
+    return s_dreamcastSavePath(epPath, saveFile);
+#else
     std::string gameSaveDir = AppPathManager::gameSaveRootDir() + Files::basename(Files::dirname(epPath));
     if(gameSaveDir.back() == ':')
         gameSaveDir.pop_back();
@@ -58,6 +132,7 @@ std::string makeGameSavePath(std::string epPath, std::string saveFile)
     pLogDebug("Save data path for ep [%s], file [%s] -> [%s]", epPath.c_str(), saveFile.c_str(), ret.c_str());
 
     return ret;
+#endif // __DREAMCAST__
 }
 
 static void s_LoadCharacter(SavedChar_t& dest, const saveCharState& s)
@@ -130,7 +205,11 @@ void FindSaves()
         std::string saveFileOldLocker = makeGameSavePath(w.WorldFilePath,
                                                          fmt::format_ne("save{0}.nosave", A));
 
+#ifdef __DREAMCAST__
+        if((Files::fileExists(saveFile) && s_dreamcastReadSave(saveFile, f)) ||
+#else
         if((Files::fileExists(saveFile) && FileFormats::ReadExtendedSaveFileF(saveFile, f)) ||
+#endif
            (!Files::fileExists(saveFileOldLocker) && Files::fileExists(saveFileOld) && FileFormats::ReadSMBX64SavFileF(saveFileOld, f)))
         {
             int curActive = 0;
@@ -430,7 +509,11 @@ void LoadGame()
                                                     fmt::format_ne("save{0}.nosave", selSave));
 
     if(Files::fileExists(savePath))
+#ifdef __DREAMCAST__
+        s_dreamcastReadSave(savePath, sav);
+#else
         FileFormats::ReadExtendedSaveFileF(savePath, sav);
+#endif
     else if(!Files::fileExists(legacySaveLocker) && Files::fileExists(savePathOld))
         FileFormats::ReadSMBX64SavFileF(savePathOld, sav);
     else
@@ -712,3 +795,4 @@ void CopySave(int world, int src, int dst)
     AppPathManager::syncFs();
 #endif
 }
+

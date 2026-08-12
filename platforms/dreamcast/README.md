@@ -28,7 +28,7 @@ efectos y música.
 | Música | OK — Ogg en buffer RAM + `fmemopen`/`sndoggvorbis` (loop sin `/cd`) |
 | Música de episodio | OK — `worlds/*/music/` + `MF:` en `.lvlx` convertidos a `.ogg` |
 | Controles Maple | OK (hotkeys sin mapear: no sobran botones en el pad) |
-| Guardado persistente | Pendiente — `/ram` es volátil, haría falta VMU |
+| Guardado persistente | OK — VMU (`/vmu/a1/`), con reserva en `/ram` si no hay tarjeta |
 | Rendimiento | Mejorable — todo va a la lista TR del PVR |
 | CI GitHub Actions | Desactivado en el fork (workflows multiplataforma eliminados) |
 
@@ -68,6 +68,10 @@ Requiere BIOS real en `~/.config/retroarch/system/dc/dc_boot.bin` en la VM, y
 
 ⚠️ **`reicast_gdrom_fast_loading` debe estar en `disabled`** o crashea al
 cargar nivel (`Fatal: SH4 exception when blocked`).
+
+⚠️ **`reicast_per_content_vmus` en `"VMU A1"`** para probar el guardado. La VMU
+compartida del sistema suele estar llena (200 bloques de 512 B); sin hueco el
+port cae al ramdisk volátil y parece que el guardado no funciona.
 
 ⚠️ En RetroArch Windows, `audio_driver = "xaudio"` suele funcionar mejor que
 `wasapi` (silencio total con wasapi es habitual).

@@ -265,6 +265,19 @@ void AppPathManager::initSettingsPath()
 
 void AppPathManager::initString(std::string& text, const std::string& inValue, const std::string& defValue)
 {
+#ifdef __DREAMCAST__
+    // On the Dreamcast these roots are not a preference, they are what the
+    // hardware allows: the ramdisk VFS has no mkdir, so portable mode's
+    // "<user>/settings/", "<user>/gamesaves/", ... can never be created, and a
+    // save only survives a power cycle if it lands on a VMU. The platform
+    // backend already picks the right root, so let it win over force-portable.
+    if(!inValue.empty())
+    {
+        text = inValue;
+        return;
+    }
+#endif
+
     if(m_isPortable)
         text = defValue;
     else
