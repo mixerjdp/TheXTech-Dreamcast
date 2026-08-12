@@ -28,7 +28,8 @@ episodio (`cliche`), se carga el nivel y se juega a ~60 FPS ocupando los
 | Rendimiento | **Mejorable** | Baja de 60 en escenas cargadas |
 | CI remoto | **Apagado** | Workflows multiplataforma borrados del fork |
 
-Artefacto entregado: `dist/dreamcast/thextech_dc.cdi` (~180 MB con `cliche` + música).
+Artefacto entregado: `dist/dreamcast/thextech_dc.cdi` (212 MB, con `cliche`,
+`the invasion 2` y música).
 
 ---
 
@@ -37,7 +38,7 @@ Artefacto entregado: `dist/dreamcast/thextech_dc.cdi` (~180 MB con `cliche` + m�
 ### 1. Assets (host: Python + Pillow + numpy + ffmpeg)
 
 ```bash
-python utils/convertkit/gfx-convert-dc.py gamepack build-dreamcast/cdroot --worlds cliche
+python utils/convertkit/gfx-convert-dc.py gamepack build-dreamcast/cdroot --worlds cliche 'the invasion 2'
 ```
 
 ~35 s. Convierte gráficos, efectos y música. Flags: `--worlds` elige campañas
@@ -493,11 +494,25 @@ partidas guardadas.
 `text 3.9 MB + bss 4.1 MB ≈ 8 MB` de 16 MB; quedan ~8 MB de heap. Vigilar al
 cargar niveles grandes. La VRAM son 8 MB aparte, con expulsión LRU.
 
-### P2 — Más campañas
+### ~~P2 — Más campañas~~ (hecho)
 
-Sólo se empaqueta `cliche` (15 niveles). `the invasion 2` (73 niveles) es el
-siguiente; el conversor acepta `--worlds`. Vigilar el tamaño de la imagen y la
-memoria al cargar niveles más grandes.
+Se empaquetan `cliche` (15 niveles) y `the invasion 2` (73 niveles). La segunda
+añade sólo **25.9 MB** al disco: los 97 MB de `graphics/` son compartidos y ya
+estaban. El CDI pasa de 188 MB a 212 MB.
+
+Medido antes de integrarla: pico de VRAM 7.19 MB (raíz 5.67 + nivel más pesado
+1.52) contra 5.62 MB de `cliche`, sobre 8 MB disponibles. Aguanta gracias a la
+expulsión LRU de `s_vram_alloc()`.
+
+`level30.lvlx` es el nivel más grande del pack (267 KB, 3.5× el mayor de
+`cliche`) y era el riesgo de RAM. Probado copiándolo como `intro.lvlx` —el motor
+lo prefiere sobre `intro.lvl`, así se fuerza su carga al arrancar—: carga con sus
+37 gráficos propios, 90 s sin crash, sin texturas faltantes. Falta recorrerlo
+entero jugando, que podría destapar picos que la carga no muestra.
+
+La campaña referencia `level36.mp3`, que **no existe en el pack**. Es un fallo
+previo de la campaña, no del port; las otras 222 referencias `MF:` van vacías y
+usan las pistas numeradas del disco.
 
 ### P2 — Paneo de audio
 

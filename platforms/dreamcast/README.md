@@ -32,13 +32,14 @@ efectos y música.
 | Rendimiento | Mejorable — todo va a la lista TR del PVR |
 | CI GitHub Actions | Desactivado en el fork (workflows multiplataforma eliminados) |
 
-Imagen lista para usar: `dist/dreamcast/thextech_dc.cdi` (~180 MB con `cliche` + música)
+Imagen lista para usar: `dist/dreamcast/thextech_dc.cdi` (212 MB, con `cliche`,
+`the invasion 2` y música)
 
 ## Build
 
 ```bash
 # 1) Assets (host: Python + Pillow + numpy + ffmpeg con libgme)
-python utils/convertkit/gfx-convert-dc.py gamepack build-dreamcast/cdroot --worlds cliche
+python utils/convertkit/gfx-convert-dc.py gamepack build-dreamcast/cdroot --worlds cliche 'the invasion 2'
 
 # 2) Motor (shell DreamSDK, ruta absoluta)
 DREAMSDK_HOME='I:\sw\dc-dev\DreamSDK' /i/sw/dc-dev/DreamSDK/usr/bin/bash.exe -l -c \
